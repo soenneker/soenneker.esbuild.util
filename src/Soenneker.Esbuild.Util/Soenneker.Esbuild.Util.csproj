@@ -9,7 +9,7 @@
     </PropertyGroup>
 
     <PropertyGroup>
-        <Description>A C# utility for installing and running esbuild builds, transforms, and incremental contexts</Description>
+        <Description>A C# utility for installing and running esbuild builds, transforms, watch mode, and development servers</Description>
         <Version Condition="'$(BUILD_VERSION)' == ''">4.0.0</Version>
         <Version Condition="'$(BUILD_VERSION)' != ''">$(BUILD_VERSION)</Version>
         <AssemblyName>Soenneker.Esbuild.Util</AssemblyName>
@@ -43,8 +43,12 @@
     </ItemGroup>
 
     <ItemGroup>
-        <EmbeddedResource Include="bridge.cjs" LogicalName="Soenneker.Esbuild.Util.bridge.cjs" />
+        <PackageReference Include="Soenneker.Utils.Json" Version="4.0.2735" />
+        <PackageReference Include="Soenneker.Extensions.Task" Version="4.0.131" />
+        <PackageReference Include="Soenneker.Extensions.ValueTask" Version="4.0.124" />
+        <PackageReference Include="Soenneker.Asyncs.Semaphores" Version="4.0.16" />
+        <PackageReference Include="Soenneker.Utils.HttpClientCache" Version="4.0.2101" />
+        <PackageReference Include="Soenneker.Utils.Process" Version="4.0.1576" />
         <PackageReference Include="Soenneker.Node.Util" Version="4.0.349" />
-        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
     </ItemGroup>
 </Project>

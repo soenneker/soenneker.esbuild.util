@@ -1,7 +1,9 @@
+using Soenneker.Esbuild.Util.Dtos;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Soenneker.Esbuild.Util.Abstract;
 using Soenneker.Node.Util.Registrars;
+using Soenneker.Utils.HttpClientCache.Registrar;
 
 namespace Soenneker.Esbuild.Util.Registrars;
 
@@ -11,7 +13,7 @@ public static class EsbuildUtilRegistrar
     /// <summary>Registers esbuild and Node utilities as singletons. Register EsbuildInstallOptions to customize installation.</summary>
     public static IServiceCollection AddEsbuildUtilAsSingleton(this IServiceCollection services)
     {
-        services.AddNodeUtilAsSingleton();
+        services.AddNodeUtilAsSingleton().AddHttpClientCacheAsSingleton();
         services.TryAddSingleton<IEsbuildUtil, EsbuildUtil>();
         return services;
     }
@@ -19,7 +21,7 @@ public static class EsbuildUtilRegistrar
     /// <summary>Registers esbuild and Node utilities as scoped services. Register EsbuildInstallOptions to customize installation.</summary>
     public static IServiceCollection AddEsbuildUtilAsScoped(this IServiceCollection services)
     {
-        services.AddNodeUtilAsScoped();
+        services.AddNodeUtilAsScoped().AddHttpClientCacheAsScoped();
         services.TryAddScoped<IEsbuildUtil, EsbuildUtil>();
         return services;
     }

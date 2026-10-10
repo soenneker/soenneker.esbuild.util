@@ -1,154 +1,271 @@
+using Soenneker.Esbuild.Util.Dtos;
+using Soenneker.Utils.Json;
+using Soenneker.Extensions.Task;
+using Soenneker.Extensions.ValueTask;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.IO;
-using System.Text.Json;
+using System.Net.Http;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Soenneker.Esbuild.Util.Abstract;
+using Soenneker.Asyncs.Semaphores;
 using Soenneker.Node.Util.Abstract;
+using Soenneker.Utils.Process.Abstract;
+using Soenneker.Utils.HttpClientCache.Abstract;
 
 namespace Soenneker.Esbuild.Util;
 
 public sealed class EsbuildUtil : IEsbuildUtil
 {
     private readonly INodeUtil _nodeUtil;
-    private readonly string _version;
+    private readonly IProcessUtil _processUtil;
+    private readonly IHttpClientCache _httpClientCache;
     private readonly string _directory;
     private readonly string? _minimumNodeVersion;
     private string? _node;
-    private string? _module;
-    private readonly SemaphoreSlim _installation = new(1, 1);
+    private readonly AsyncSemaphore _installation = new(1, 1);
 
-    public EsbuildUtil(INodeUtil nodeUtil, EsbuildInstallOptions? options = null)
+    public EsbuildUtil(INodeUtil nodeUtil, IProcessUtil processUtil, IHttpClientCache httpClientCache, EsbuildInstallOptions? options = null)
     {
         _nodeUtil = nodeUtil;
-        options ??= new();
-        if (!Regex.IsMatch(options.Version, @"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$", RegexOptions.CultureInvariant))
-            throw new ArgumentException("Specify an exact esbuild semantic version.", nameof(options));
-        _version = options.Version;
+        _processUtil = processUtil;
+        _httpClientCache = httpClientCache;
+        options ??= new EsbuildInstallOptions();
         _minimumNodeVersion = options.MinimumNodeVersion;
-        _directory = Path.GetFullPath(options.Directory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Soenneker", "Esbuild", _version));
+        _directory = Path.GetFullPath(options.Directory ??
+                                      Path.Combine(
+                                          Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                          "Soenneker", "Esbuild"));
     }
 
     public async ValueTask<string> EnsureInstalled(CancellationToken cancellationToken = default)
     {
-        await _installation.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        using (SemaphoreLease lease = await _installation.Acquire(cancellationToken).NoSync())
         {
-            if (_module != null && File.Exists(Path.Combine(_module, "lib", "main.js"))) return _module;
-            _node = await _nodeUtil.EnsureInstalled(_minimumNodeVersion, cancellationToken: cancellationToken).ConfigureAwait(false);
-            Directory.CreateDirectory(_directory);
+            // Resolve on every operation so a singleton does not remain on an outdated release.
+            HttpClient registry = await _httpClientCache.Get("Soenneker.Esbuild.Util.Registry", cancellationToken).NoSync();
+            string metadata = await registry
+                                    .GetStringAsync("https://registry.npmjs.org/esbuild/latest", cancellationToken)
+                                    .NoSync();
+            string version = JsonUtil.Deserialize(metadata, EsbuildJsonContext.Default.JsonNode)?["version"]?.GetValue<string>() ??
+                             throw new InvalidOperationException("The npm registry did not return an esbuild version.");
+            if (!Regex.IsMatch(version, @"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$", RegexOptions.CultureInvariant))
+                throw new InvalidOperationException("The npm registry returned an invalid esbuild version.");
+            // Separate releases keep existing contexts intact while new operations use the latest release.
+            string directory = Path.Combine(_directory, version);
+            _node = await _nodeUtil.EnsureInstalled(_minimumNodeVersion, cancellationToken: cancellationToken)
+                                   .NoSync();
+            Directory.CreateDirectory(directory);
             // Coordinate installation across scopes and processes sharing the same cache.
-            await using FileStream installationLock = await AcquireLock(cancellationToken).ConfigureAwait(false);
-            string manifest = Path.Combine(_directory, "package.json");
+            await using FileStream installationLock =
+                await AcquireLock(directory, cancellationToken).NoSync();
+            string manifest = Path.Combine(directory, "package.json");
             if (File.Exists(manifest))
             {
-                JsonNode? existing = JsonNode.Parse(await File.ReadAllTextAsync(manifest, cancellationToken).ConfigureAwait(false));
-                if (existing?["name"]?.GetValue<string>() != "soenneker-esbuild-runtime" || existing?["dependencies"]?["esbuild"]?.GetValue<string>() != _version)
-                    throw new InvalidOperationException("The installation directory belongs to another project or esbuild version. Use a dedicated empty directory.");
+                JsonNode? existing =
+                    JsonUtil.Deserialize(await File.ReadAllTextAsync(manifest, cancellationToken).NoSync(), EsbuildJsonContext.Default.JsonNode);
+                if (existing?["name"]?.GetValue<string>() != "soenneker-esbuild-runtime" ||
+                    existing?["dependencies"]?["esbuild"]?.GetValue<string>() != version)
+                    throw new InvalidOperationException(
+                        "The installation directory belongs to another project or esbuild version. Use a dedicated empty directory.");
             }
             else
             {
-                var package = new JsonObject { ["name"] = "soenneker-esbuild-runtime", ["private"] = true,
-                    ["dependencies"] = new JsonObject { ["esbuild"] = _version } };
-                await File.WriteAllTextAsync(manifest, package.ToJsonString(), cancellationToken).ConfigureAwait(false);
+                var package = new JsonObject
+                {
+                    ["name"] = "soenneker-esbuild-runtime", ["private"] = true,
+                    ["dependencies"] = new JsonObject { ["esbuild"] = version }
+                };
+                await File.WriteAllTextAsync(manifest, JsonUtil.Serialize(package, EsbuildJsonContext.Default.JsonObject), cancellationToken).NoSync();
             }
-            string module = Path.Combine(_directory, "node_modules", "esbuild");
-            if (!File.Exists(Path.Combine(module, "lib", "main.js")))
-                await _nodeUtil.NpmInstall(_directory, skipIfUpToDate: false, cancellationToken: cancellationToken).ConfigureAwait(false);
-            try { await VerifyInstallation(module, cancellationToken).ConfigureAwait(false); }
+
+            string module = Path.Combine(directory, "node_modules", "esbuild");
+            if (!File.Exists(Path.Combine(module, "bin", "esbuild")))
+                await _nodeUtil.NpmInstall(directory, skipIfUpToDate: false, cancellationToken: cancellationToken)
+                               .NoSync();
+            try
+            {
+                await VerifyInstallation(module, version, directory, cancellationToken).NoSync();
+            }
             catch (Exception ex) when (ex is InvalidOperationException or EsbuildException)
             {
                 // npm ci repairs incomplete or corrupt platform binaries in this dedicated runtime directory.
-                await _nodeUtil.NpmInstall(_directory, cleanInstall: File.Exists(Path.Combine(_directory, "package-lock.json")),
-                    skipIfUpToDate: false, cancellationToken: cancellationToken).ConfigureAwait(false);
-                await VerifyInstallation(module, cancellationToken).ConfigureAwait(false);
+                await _nodeUtil.NpmInstall(directory,
+                    cleanInstall: File.Exists(Path.Combine(directory, "package-lock.json")), skipIfUpToDate: false,
+                    cancellationToken: cancellationToken).NoSync();
+                await VerifyInstallation(module, version, directory, cancellationToken).NoSync();
             }
-            _module = module;
-            return module;
+
+            return Path.Combine(module, "bin", "esbuild");
         }
-        finally { _installation.Release(); }
     }
 
-    private async ValueTask VerifyInstallation(string module, CancellationToken cancellationToken)
+    private async ValueTask VerifyInstallation(string module, string version, string directory,
+        CancellationToken cancellationToken)
     {
-        await using var probe = new EsbuildProcess(_node!, module, _directory);
-        string actualVersion = (await probe.Invoke("version", null, cancellationToken).ConfigureAwait(false))!.GetValue<string>();
-        if (actualVersion != _version) throw new InvalidOperationException($"Expected esbuild {_version}, found {actualVersion}.");
-        // Loading the JS module alone does not verify the platform binary.
-        await probe.Invoke("transform", new JsonObject { ["input"] = "", ["options"] = new JsonObject() }, cancellationToken).ConfigureAwait(false);
+        await using EsbuildSession session = await Launch(Path.Combine(module, "bin", "esbuild"), ["--version"],
+            directory, null, false, null, cancellationToken).NoSync();
+        EsbuildCommandResult result = await session.WaitForExit(cancellationToken).NoSync();
+        ThrowIfFailed(result);
+        if (result.StandardOutput.Trim() != version)
+            throw new InvalidOperationException($"Expected esbuild {version}, found {result.StandardOutput.Trim()}.");
     }
 
-    private async ValueTask<FileStream> AcquireLock(CancellationToken cancellationToken)
+    private async ValueTask<FileStream> AcquireLock(string directory, CancellationToken cancellationToken)
     {
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            try { return new FileStream(Path.Combine(_directory, ".install.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            try
+            {
+                return new FileStream(Path.Combine(directory, ".install.lock"), FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite, FileShare.None);
+            }
             catch (IOException ex) when ((ex.HResult & 0xFFFF) is 11 or 32 or 33)
             {
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(100, cancellationToken).NoSync();
             }
         }
     }
 
-    private async ValueTask<EsbuildProcess> Start(string? directory, CancellationToken cancellationToken)
+    private async ValueTask<EsbuildSession> Launch(string cli, IReadOnlyList<string> arguments, string? directory,
+        string? input, bool keepInputOpen, IReadOnlyDictionary<string, string>? environment,
+        CancellationToken cancellationToken)
     {
-        string module = await EnsureInstalled(cancellationToken).ConfigureAwait(false);
-        return new EsbuildProcess(_node!, module, Path.GetFullPath(directory ?? Environment.CurrentDirectory));
+        string executable = cli;
+        // npm uses a Node CLI launcher on Windows and may replace it with the native binary on Unix.
+        using (FileStream file = File.OpenRead(cli))
+        {
+            if (file.ReadByte() == '#' && file.ReadByte() == '!')
+            {
+                executable = _node!;
+                arguments = new[] { cli }.Concat(arguments).ToArray();
+            }
+        }
+
+        return await EsbuildSession.Start(_processUtil, executable, arguments, directory, input, keepInputOpen,
+            environment, cancellationToken).NoSync();
     }
 
-    public async ValueTask<string> GetVersion(CancellationToken cancellationToken = default)
+    private async ValueTask<EsbuildSession> StartCommand(IReadOnlyList<string> arguments, string? directory,
+        string? input, bool keepInputOpen, IReadOnlyDictionary<string, string>? environment,
+        CancellationToken cancellationToken)
     {
-        await using EsbuildProcess process = await Start(null, cancellationToken).ConfigureAwait(false);
-        return (await process.Invoke("version", null, cancellationToken).ConfigureAwait(false))!.GetValue<string>();
+        ArgumentNullException.ThrowIfNull(arguments);
+        string cli = await EnsureInstalled(cancellationToken).NoSync();
+        return await Launch(cli, arguments, directory, input, keepInputOpen, environment, cancellationToken)
+            .NoSync();
     }
 
-    public async ValueTask<EsbuildBuildResult> Build(EsbuildBuildOptions options, CancellationToken cancellationToken = default)
+    private static void ThrowIfFailed(EsbuildCommandResult result)
     {
-        ArgumentNullException.ThrowIfNull(options);
-        await using EsbuildProcess process = await Start(options.AbsWorkingDir, cancellationToken).ConfigureAwait(false);
-        return (await process.Invoke("build", JsonSerializer.SerializeToNode(options, EsbuildJsonContext.Default.EsbuildBuildOptions), cancellationToken).ConfigureAwait(false))
-            .Deserialize(EsbuildJsonContext.Default.EsbuildBuildResult)!;
+        if (result.ExitCode != 0)
+            throw new EsbuildException(result);
     }
 
-    public async ValueTask<EsbuildTransformResult> Transform(string input, EsbuildTransformOptions? options = null, CancellationToken cancellationToken = default)
+    public async ValueTask<EsbuildCommandResult> Run(IReadOnlyList<string> arguments, string? workingDirectory = null,
+        string? input = null, CancellationToken cancellationToken = default)
+    {
+        await using EsbuildSession session =
+            await StartCommand(arguments, workingDirectory, input, false, null, cancellationToken)
+                .NoSync();
+        EsbuildCommandResult result = await session.WaitForExit(cancellationToken).NoSync();
+        ThrowIfFailed(result);
+        return result;
+    }
+
+    public async ValueTask<IEsbuildSession> Start(IReadOnlyList<string> arguments, string? workingDirectory = null,
+        string? input = null, CancellationToken cancellationToken = default) =>
+        await StartCommand(arguments, workingDirectory, input, input == null, null, cancellationToken)
+            .NoSync();
+
+    public async ValueTask<string> GetVersion(CancellationToken cancellationToken = default) =>
+        (await Run(["--version"], cancellationToken: cancellationToken).NoSync()).StandardOutput.Trim();
+
+    private async ValueTask<EsbuildSession> StartBuild(EsbuildBuildOptions options, List<string> arguments,
+        bool keepInputOpen, CancellationToken cancellationToken)
+    {
+        Dictionary<string, string>? environment = options.NodePaths == null
+            ? null
+            : new Dictionary<string, string>
+            {
+                ["NODE_PATH"] = string.Join(Path.PathSeparator, options.NodePaths)
+            };
+        string? directory = options.Stdin?.ResolveDir ?? options.AbsWorkingDir;
+        if (directory != null)
+            directory = Path.GetFullPath(directory);
+        return await StartCommand(arguments, directory, options.Stdin?.Contents, keepInputOpen, environment,
+            cancellationToken).NoSync();
+    }
+
+    private async ValueTask<EsbuildCommandResult> RunBuild(EsbuildBuildOptions options, List<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        await using EsbuildSession session =
+            await StartBuild(options, arguments, false, cancellationToken).NoSync();
+        EsbuildCommandResult result = await session.WaitForExit(cancellationToken).NoSync();
+        ThrowIfFailed(result);
+        return result;
+    }
+
+    public ValueTask<EsbuildCommandResult> Build(EsbuildBuildOptions options,
+        CancellationToken cancellationToken = default) =>
+        RunBuild(options, EsbuildArguments.Build(options), cancellationToken);
+
+    public ValueTask<EsbuildCommandResult> Transform(string input, EsbuildTransformOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        await using EsbuildProcess process = await Start(null, cancellationToken).ConfigureAwait(false);
-        return (await process.Invoke("transform", new JsonObject { ["input"] = input,
-            ["options"] = JsonSerializer.SerializeToNode(options ?? new(), EsbuildJsonContext.Default.EsbuildTransformOptions) }, cancellationToken).ConfigureAwait(false))
-            .Deserialize(EsbuildJsonContext.Default.EsbuildTransformResult)!;
+        return Run(EsbuildArguments.Transform(options ?? new EsbuildTransformOptions()), input: input, cancellationToken: cancellationToken);
     }
 
-    public async ValueTask<IEsbuildContext> CreateContext(EsbuildBuildOptions options, CancellationToken cancellationToken = default)
+    public ValueTask<EsbuildCommandResult> Analyze(EsbuildBuildOptions options, EsbuildAnalyzeOptions? analysis = null,
+        CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(options);
-        EsbuildProcess process = await Start(options.AbsWorkingDir, cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await process.Invoke("context", JsonSerializer.SerializeToNode(options, EsbuildJsonContext.Default.EsbuildBuildOptions), cancellationToken).ConfigureAwait(false);
-            return new EsbuildContext(process);
-        }
-        catch { await process.DisposeAsync().ConfigureAwait(false); throw; }
+        List<string> arguments = EsbuildArguments.Build(options);
+        arguments.Add(analysis?.Verbose == true ? "--analyze=verbose" : "--analyze");
+        if (analysis?.Color is { } color)
+            arguments.Add(color ? "--color=true" : "--color=false");
+        return RunBuild(options, arguments, cancellationToken);
     }
 
-    public async ValueTask<string> AnalyzeMetafile(string metafile, EsbuildAnalyzeOptions? options = null, CancellationToken cancellationToken = default)
+    public async ValueTask<IEsbuildSession> Watch(EsbuildBuildOptions options, EsbuildWatchOptions? watch = null,
+        CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(metafile);
-        await using EsbuildProcess process = await Start(null, cancellationToken).ConfigureAwait(false);
-        return (await process.Invoke("analyze", new JsonObject { ["metafile"] = metafile,
-            ["options"] = JsonSerializer.SerializeToNode(options ?? new(), EsbuildJsonContext.Default.EsbuildAnalyzeOptions) }, cancellationToken).ConfigureAwait(false))!.GetValue<string>();
+        List<string> arguments = EsbuildArguments.Build(options);
+        if (options.Stdin != null)
+            throw new ArgumentException("Watch requires file entry points.", nameof(options));
+        arguments.Add("--watch=forever");
+        if (watch?.Delay is { } delay)
+            arguments.Add($"--watch-delay={delay}");
+        return await StartBuild(options, arguments, true, cancellationToken).NoSync();
     }
 
-    public async ValueTask<string[]> FormatMessages(EsbuildMessage[] messages, EsbuildFormatOptions? options = null, CancellationToken cancellationToken = default)
+    public async ValueTask<IEsbuildSession> Serve(EsbuildBuildOptions options, EsbuildServeOptions? server = null,
+        bool watch = false, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(messages);
-        await using EsbuildProcess process = await Start(null, cancellationToken).ConfigureAwait(false);
-        return (await process.Invoke("format", new JsonObject { ["messages"] = JsonSerializer.SerializeToNode(messages, EsbuildJsonContext.Default.EsbuildMessageArray),
-            ["options"] = JsonSerializer.SerializeToNode(options ?? new(), EsbuildJsonContext.Default.EsbuildFormatOptions) }, cancellationToken).ConfigureAwait(false))
-            .Deserialize(EsbuildJsonContext.Default.StringArray)!;
+        List<string> arguments = EsbuildArguments.Build(options);
+        if (options.Stdin != null)
+            throw new ArgumentException("Serve requires file entry points.", nameof(options));
+        server ??= new EsbuildServeOptions();
+        if (server.Port is < 0 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(server.Port));
+        string host = server.Host ?? "127.0.0.1";
+        if (host.Contains(':') && !host.StartsWith('['))
+            host = $"[{host}]";
+        arguments.Add($"--serve={host}:{server.Port ?? 0}");
+        if (watch)
+            arguments.Add("--watch=forever");
+        EsbuildArguments.Add(arguments, "servedir", server.Servedir);
+        EsbuildArguments.Add(arguments, "serve-fallback", server.Fallback);
+        EsbuildArguments.Add(arguments, "keyfile", server.Keyfile);
+        EsbuildArguments.Add(arguments, "certfile", server.Certfile);
+        if (server.CorsOrigin != null)
+            arguments.Add($"--cors-origin={string.Join(',', server.CorsOrigin)}");
+        return await StartBuild(options, arguments, true, cancellationToken).NoSync();
     }
 }
