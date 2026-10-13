@@ -44,12 +44,12 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Soenneker.Utils.Json" Version="4.0.2738" />
-        <PackageReference Include="Soenneker.Extensions.Task" Version="4.0.133" />
-        <PackageReference Include="Soenneker.Extensions.ValueTask" Version="4.0.126" />
-        <PackageReference Include="Soenneker.Asyncs.Semaphores" Version="4.0.20" />
-        <PackageReference Include="Soenneker.Utils.HttpClientCache" Version="4.0.2110" />
-        <PackageReference Include="Soenneker.Utils.Process" Version="4.0.1581" />
-        <PackageReference Include="Soenneker.Node.Util" Version="4.0.354" />
+        <PackageReference Include="Soenneker.Utils.Json" Version="4.0.2742" />
+        <PackageReference Include="Soenneker.Extensions.Task" Version="4.0.134" />
+        <PackageReference Include="Soenneker.Extensions.ValueTask" Version="4.0.127" />
+        <PackageReference Include="Soenneker.Asyncs.Semaphores" Version="4.0.21" />
+        <PackageReference Include="Soenneker.Utils.HttpClientCache" Version="4.0.2115" />
+        <PackageReference Include="Soenneker.Utils.Process" Version="4.0.1586" />
+        <PackageReference Include="Soenneker.Node.Util" Version="4.0.359" />
     </ItemGroup>
 </Project>
