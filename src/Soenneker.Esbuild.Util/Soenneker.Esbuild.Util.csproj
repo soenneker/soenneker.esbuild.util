@@ -2,7 +2,7 @@
 
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-        <TargetFramework>net10.0</TargetFramework>
+        <TargetFramework>net11.0</TargetFramework>
         <Nullable>enable</Nullable>
         <Platforms>AnyCPU</Platforms>
         <NoWarn>$(NoWarn);1591</NoWarn>
@@ -10,7 +10,7 @@
 
     <PropertyGroup>
         <Description>A C# utility for installing and running esbuild builds, transforms, watch mode, and development servers</Description>
-        <Version Condition="'$(BUILD_VERSION)' == ''">4.0.0</Version>
+        <Version Condition="'$(BUILD_VERSION)' == ''">11.0.0</Version>
         <Version Condition="'$(BUILD_VERSION)' != ''">$(BUILD_VERSION)</Version>
         <AssemblyName>Soenneker.Esbuild.Util</AssemblyName>
         <PackageId>Soenneker.Esbuild.Util</PackageId>
@@ -50,6 +50,6 @@
         <PackageReference Include="Soenneker.Asyncs.Semaphores" Version="4.0.33" />
         <PackageReference Include="Soenneker.Utils.HttpClientCache" Version="4.0.2128" />
         <PackageReference Include="Soenneker.Utils.Process" Version="4.0.1598" />
-        <PackageReference Include="Soenneker.Node.Util" Version="4.0.383" />
+        <PackageReference Include="Soenneker.Node.Util" Version="4.0.384" />
     </ItemGroup>
 </Project>
