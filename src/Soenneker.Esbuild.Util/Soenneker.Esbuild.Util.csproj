@@ -50,6 +50,6 @@
         <PackageReference Include="Soenneker.Asyncs.Semaphores" Version="11.0.36" />
         <PackageReference Include="Soenneker.Utils.HttpClientCache" Version="11.0.2139" />
         <PackageReference Include="Soenneker.Utils.Process" Version="11.0.1604" />
-        <PackageReference Include="Soenneker.Node.Util" Version="11.0.396" />
+        <PackageReference Include="Soenneker.Node.Util" Version="11.0.397" />
     </ItemGroup>
 </Project>
