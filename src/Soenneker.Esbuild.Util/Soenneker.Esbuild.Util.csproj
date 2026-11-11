@@ -44,9 +44,9 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Soenneker.Utils.Json" Version="11.0.2786" />
+        <PackageReference Include="Soenneker.Utils.Json" Version="11.0.2787" />
         <PackageReference Include="Soenneker.Asyncs.Semaphores" Version="11.0.38" />
-        <PackageReference Include="Soenneker.Utils.HttpClientCache" Version="11.0.2152" />
-        <PackageReference Include="Soenneker.Node.Util" Version="11.0.409" />
+        <PackageReference Include="Soenneker.Utils.HttpClientCache" Version="11.0.2153" />
+        <PackageReference Include="Soenneker.Node.Util" Version="11.0.413" />
     </ItemGroup>
 </Project>
